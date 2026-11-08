@@ -2,6 +2,7 @@ import { Router } from "express";
 import { z } from "zod";
 import { append, list, remove, reorder, update } from "../lib/store.js";
 import { avatarAndVideo, commitAvatarAndVideo, deleteImage, deleteUpload, discardUploads, saveImage, singleImage } from "../lib/uploads.js";
+import { optimizedImageUrl } from "../lib/cloudinary.js";
 import { notifyFrontend } from "../lib/revalidate.js";
 import { getLinks, normalizeWebUrl, saveLinks } from "../lib/links.js";
 import { getSlideshow, saveSlideshow } from "../lib/slideshow.js";
@@ -178,7 +179,7 @@ const WorkFields = {
 orderedCollection("works", {
   createSchema: z.object({ alt: WorkFields.alt, url: projectUrl.default(""), published: bool.default(true) }),
   patchSchema: z.object(WorkFields).partial(),
-  // Uploaded images are served by this API, so expose an absolute URL; bundled images stay relative.
+  // Uploaded images come from Cloudinary (absolute URLs); bundled images stay relative.
   toPublic: (r, req) => ({ ...r, src: toUrl(r.src, req) }),
   hooks: {
     upload: singleImage("image"),
@@ -225,8 +226,10 @@ orderedCollection("testimonials", {
   },
 });
 
+/** Address the browser uses for a stored file: Cloudinary images get automatic format/quality, bundled images stay relative. */
 export function toUrl(src, req) {
-  if (!src.startsWith("/uploads/")) return src;
+  if (!src.startsWith("/uploads/")) return optimizedImageUrl(src);
+  // Older files saved on this server's own disk (before Cloudinary).
   return `${process.env.PUBLIC_API_URL || `${req.protocol}://${req.get("host")}`}${src}`;
 }
 

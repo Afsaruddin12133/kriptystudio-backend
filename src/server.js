@@ -9,9 +9,22 @@ import contentRouter from "./routes/content.js";
 import subscribeRouter from "./routes/subscribe.js";
 import trackRouter from "./routes/track.js";
 import { defaultFaqs, defaultTestimonials, defaultWorks } from "./lib/defaults.js";
+import { cloudinaryEnabled } from "./lib/cloudinary.js";
 import { closeDb, connectDb, pingDb } from "./lib/db.js";
 import { seedOnce } from "./lib/store.js";
 import { uploadsDir } from "./lib/uploads.js";
+
+// In production a missing setting would not fail loudly: sessions would silently die on every restart (JWT_SECRET)
+// or the website would be blocked by CORS (CORS_ORIGIN). Refuse to start instead, so a bad deploy is obvious.
+if (process.env.NODE_ENV === "production") {
+  const missing = ["JWT_SECRET", "CORS_ORIGIN", "MONGODB_URI"].filter((name) => !process.env[name]);
+  // Uploaded images and videos must go to Cloudinary: the server's own disk is wiped on every deploy.
+  if (!cloudinaryEnabled()) missing.push("CLOUDINARY_URL (or CLOUDINARY_CLOUD_NAME + CLOUDINARY_API_KEY + CLOUDINARY_API_SECRET)");
+  if (missing.length) {
+    console.error(`\nMissing required environment variable(s): ${missing.join(", ")}. See backend/.env.example.\n`);
+    process.exit(1);
+  }
+}
 
 const app = express();
 const PORT = Number(process.env.PORT) || 4000;
@@ -72,7 +85,7 @@ await seedOnce("works", defaultWorks);
 await seedOnce("testimonials", defaultTestimonials);
 
 const server = app.listen(PORT, () => {
-  console.log(`Kripty Studio API listening on http://localhost:${PORT} (MongoDB: ${process.env.MONGODB_DB || "kripty"})`);
+  console.log(`Kripty Studio API listening on port ${PORT} (MongoDB: ${process.env.MONGODB_DB || "kripty"}, uploads: ${cloudinaryEnabled() ? "Cloudinary" : "local folder"})`);
 });
 
 for (const signal of ["SIGINT", "SIGTERM"]) {

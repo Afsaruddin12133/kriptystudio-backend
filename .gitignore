@@ -1,4 +1,4 @@
 node_modules
-.env
 data
 uploads
+config.bat

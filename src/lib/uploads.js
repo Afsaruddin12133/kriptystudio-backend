@@ -1,8 +1,13 @@
-import { mkdir, open, rename, stat, unlink, writeFile } from "node:fs/promises";
+import { copyFile, mkdir, open, rename, stat, unlink, writeFile } from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 import crypto from "node:crypto";
 import multer from "multer";
+import { cloudinaryEnabled, destroyByUrl, uploadFromPath, uploadImageBuffer } from "./cloudinary.js";
 
+// Uploads go to Cloudinary whenever its credentials are set (always the case in production). Without them they are
+// written to the local uploads folder below, so the project still runs on a developer machine with no account.
+// Files that are already saved under /uploads/ (from before Cloudinary) are still served and deleted from that folder.
 export const uploadsDir = () => path.resolve(process.env.UPLOADS_DIR || "uploads");
 
 const MAX_BYTES = 5 * 1024 * 1024;
@@ -17,7 +22,21 @@ function sniff(buf) {
   return null;
 }
 
-/** Validates and stores an uploaded image. Returns its public path (e.g. /uploads/ab12.png). */
+/** Moves a file, also across drives (the temp folder and the uploads folder can be on different ones). */
+async function moveFile(from, to) {
+  try {
+    await rename(from, to);
+  } catch (err) {
+    if (err.code !== "EXDEV") throw err;
+    await copyFile(from, to);
+    await unlink(from);
+  }
+}
+
+/**
+ * Validates and stores an uploaded image. Returns what to save in the database: the Cloudinary https URL,
+ * or (development without Cloudinary) a local path such as /uploads/ab12.png.
+ */
 export async function saveImage(file) {
   const ext = sniff(file.buffer);
   if (!ext) {
@@ -25,25 +44,30 @@ export async function saveImage(file) {
     err.status = 400;
     throw err;
   }
+  if (cloudinaryEnabled()) return uploadImageBuffer(file.buffer);
   await mkdir(uploadsDir(), { recursive: true });
   const name = `${crypto.randomBytes(12).toString("hex")}.${ext}`;
   await writeFile(path.join(uploadsDir(), name), file.buffer);
   return `/uploads/${name}`;
 }
 
-/** Deletes a previously uploaded file; ignores frontend-bundled images and missing files. */
+/** Deletes a previously uploaded file (Cloudinary or local); ignores frontend-bundled images and missing files. */
 export async function deleteUpload(src) {
-  if (typeof src !== "string" || !/^\/uploads\/[a-f0-9]{24}\.(png|jpg|webp|mp4|webm)$/.test(src)) return;
-  await unlink(path.join(uploadsDir(), path.basename(src))).catch(() => {});
+  if (typeof src !== "string") return;
+  if (/^\/uploads\/[a-f0-9]{24}\.(png|jpg|webp|mp4|webm)$/.test(src)) {
+    await unlink(path.join(uploadsDir(), path.basename(src))).catch(() => {});
+    return;
+  }
+  await destroyByUrl(src);
 }
 export const deleteImage = deleteUpload;
 
 // --- Media uploads (testimonial avatar + video) ---------------------------------------------
 // Videos can be large, so they are streamed to a temp folder on disk instead of held in memory,
-// then validated by their leading bytes and moved into place.
+// then validated by their leading bytes and sent to Cloudinary (or moved into the local uploads folder).
 
 const MAX_VIDEO_BYTES = 50 * 1024 * 1024;
-const tmpDir = () => path.join(uploadsDir(), ".tmp");
+const tmpDir = () => path.join(os.tmpdir(), "kripty-uploads");
 
 const mediaUpload = multer({
   storage: multer.diskStorage({
@@ -85,8 +109,9 @@ export const avatarAndVideo = () => (req, res, next) =>
   });
 
 /**
- * Validates the uploaded avatar/video of a request and moves them into the public uploads folder.
- * Returns { avatar?, video? } (public paths). Everything is cleaned up if either file is invalid.
+ * Validates the uploaded avatar/video of a request and stores them (Cloudinary, or the local uploads folder in
+ * development). Returns { avatar?, video? } (what to save in the database). Everything is cleaned up if either file
+ * is invalid or an upload fails.
  */
 export async function commitAvatarAndVideo(req) {
   const result = {};
@@ -97,20 +122,38 @@ export async function commitAvatarAndVideo(req) {
     throw Object.assign(new Error(message), { status: 400 });
   };
 
+  // Checks both files first, so nothing is uploaded when the second one is invalid.
+  let avatarExt;
+  let videoExt;
   if (avatar) {
-    const ext = sniff(await readHead(avatar.path));
-    if (!ext) return reject("Avatar must be a PNG, JPEG or WebP image");
+    avatarExt = sniff(await readHead(avatar.path));
+    if (!avatarExt) return reject("Avatar must be a PNG, JPEG or WebP image");
     if ((await stat(avatar.path)).size > MAX_BYTES) return reject("Avatar must be 5 MB or smaller");
-    const name = `${crypto.randomBytes(12).toString("hex")}.${ext}`;
-    await rename(avatar.path, path.join(uploadsDir(), name));
-    result.avatar = `/uploads/${name}`;
   }
   if (video) {
-    const ext = sniffVideo(await readHead(video.path));
-    if (!ext) return reject("Video must be an MP4 or WebM file");
+    videoExt = sniffVideo(await readHead(video.path));
+    if (!videoExt) return reject("Video must be an MP4 or WebM file");
+  }
+
+  // Cloudinary reads the temp file, then it is removed; locally it is moved into the uploads folder.
+  const store = async (file, ext, resourceType) => {
+    if (cloudinaryEnabled()) {
+      const url = await uploadFromPath(file.path, resourceType);
+      await unlink(file.path).catch(() => {});
+      return url;
+    }
+    await mkdir(uploadsDir(), { recursive: true });
     const name = `${crypto.randomBytes(12).toString("hex")}.${ext}`;
-    await rename(video.path, path.join(uploadsDir(), name));
-    result.video = `/uploads/${name}`;
+    await moveFile(file.path, path.join(uploadsDir(), name));
+    return `/uploads/${name}`;
+  };
+
+  try {
+    if (avatar) result.avatar = await store(avatar, avatarExt, "image");
+    if (video) result.video = await store(video, videoExt, "video");
+  } catch (err) {
+    await Promise.all([deleteUpload(result.avatar), deleteUpload(result.video), discardUploads(req)]);
+    throw err;
   }
   return result;
 }

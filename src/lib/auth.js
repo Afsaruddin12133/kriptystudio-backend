@@ -49,7 +49,15 @@ export async function setAdminPassword(newPassword) {
   return next;
 }
 
-export const signToken = (admin) => jwt.sign({ sub: admin.email, pv: admin.updatedAt }, secret(), { expiresIn: TOKEN_TTL });
+/** Changes the sign-in email. Bumping updatedAt also invalidates every token issued before the change. */
+export async function setAdminEmail(newEmail) {
+  const admin = await ensureAdmin();
+  const next = { ...admin, email: String(newEmail).trim().toLowerCase(), updatedAt: new Date().toISOString() };
+  await setDoc("admin", next);
+  return next;
+}
+
+export const signToken =(admin) => jwt.sign({ sub: admin.email, pv: admin.updatedAt }, secret(), { expiresIn: TOKEN_TTL });
 
 /** Express middleware: requires a valid Bearer token issued for the current password version. */
 export async function requireAdmin(req, res, next) {

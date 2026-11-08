@@ -1,0 +1,51 @@
+# Render Blueprint for the Kripty Studio API (New > Blueprint, pick this repository).
+# Values marked `sync: false` are asked for in the Render dashboard; they are never stored in git.
+services:
+  - type: web
+    name: kripty-studio-api
+    runtime: node
+    # Uploads live on Cloudinary, so no disk is needed. The free plan sleeps after 15 minutes without traffic (the
+    # first visit then waits about a minute); use `starter` for an always-on server.
+    plan: free
+    buildCommand: npm ci
+    startCommand: npm start
+    healthCheckPath: /api/health
+    autoDeploy: true
+    envVars:
+      - key: NODE_VERSION
+        value: "22"
+      - key: NODE_ENV
+        value: production
+      # Render puts one proxy in front of the app; this makes req.ip the real visitor (rate limits, analytics).
+      - key: TRUST_PROXY
+        value: "1"
+      - key: MONGODB_DB
+        value: kripty
+      - key: TRACK_FULL_IP
+        value: "false"
+      - key: TRACK_RETENTION_DAYS
+        value: "395"
+      # Random secret that signs admin sessions. Generated once and kept across deploys.
+      - key: JWT_SECRET
+        generateValue: true
+      # Must be identical to REVALIDATE_SECRET in Vercel.
+      - key: REVALIDATE_SECRET
+        sync: false
+      - key: MONGODB_URI
+        sync: false
+      # The website's address(es), comma separated, no trailing slash: https://your-site.vercel.app,https://www.yourdomain.com
+      - key: CORS_ORIGIN
+        sync: false
+      # Main address of the website (used to refresh its content after an admin edit).
+      - key: FRONTEND_URL
+        sync: false
+      # Cloudinary > Settings > API Keys > "API environment variable": cloudinary://API_KEY:API_SECRET@CLOUD_NAME
+      - key: CLOUDINARY_URL
+        sync: false
+      - key: CLOUDINARY_FOLDER
+        value: kripty-studio
+      # Used once, to create the admin account on first start. Change the password later under Admin > Settings.
+      - key: ADMIN_EMAIL
+        sync: false
+      - key: ADMIN_PASSWORD
+        sync: false

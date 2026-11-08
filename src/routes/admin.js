@@ -1,7 +1,7 @@
 import { Router } from "express";
 import rateLimit from "express-rate-limit";
 import { z } from "zod";
-import { ensureAdmin, requireAdmin, setAdminPassword, signToken, verifyPassword } from "../lib/auth.js";
+import { ensureAdmin, requireAdmin, setAdminEmail, setAdminPassword, signToken, verifyPassword } from "../lib/auth.js";
 import { col } from "../lib/db.js";
 import { list, page, remove, update } from "../lib/store.js";
 import { BUDGETS } from "./contact.js";
@@ -77,7 +77,42 @@ const PasswordSchema = z.object({
   newPassword: z.string().min(10, "Use at least 10 characters").max(200),
 });
 
-router.post("/password", async (req, res, next) => {
+// Both account changes ask for the current password, so limit guessing it with a stolen session.
+const accountLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: 10,
+  standardHeaders: "draft-8",
+  legacyHeaders: false,
+  message: { error: "Too many attempts. Try again later." },
+});
+
+const EmailSchema = z.object({
+  currentPassword: z.string().min(1).max(200),
+  newEmail: z.string().trim().toLowerCase().email("Enter a valid email address").max(254),
+});
+
+router.post("/email", accountLimiter, async (req, res, next) => {
+  const parsed = EmailSchema.safeParse(req.body);
+  if (!parsed.success) {
+    return res.status(400).json({ error: parsed.error.issues[0]?.message || "Invalid input" });
+  }
+  try {
+    const admin = await ensureAdmin();
+    if (!verifyPassword(parsed.data.currentPassword, admin.passwordHash)) {
+      return res.status(400).json({ error: "Current password is incorrect" });
+    }
+    if (parsed.data.newEmail === admin.email) {
+      return res.status(400).json({ error: "That is already your sign-in email" });
+    }
+    const updated = await setAdminEmail(parsed.data.newEmail);
+    // Other sessions are signed out; this one continues with a fresh token.
+    res.json({ ok: true, email: updated.email, token: signToken(updated) });
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.post("/password", accountLimiter, async (req, res, next) => {
   const parsed = PasswordSchema.safeParse(req.body);
   if (!parsed.success) {
     return res.status(400).json({ error: parsed.error.issues[0]?.message || "Invalid input" });
